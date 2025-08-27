@@ -2,3 +2,24 @@
 __pycache__/
 .streamlit/
 .DS_Store
+
+# ignore all data by default, then whitelist the two app data files
+data/*
+!data/weekly.csv
+!data/receiver_score_tiers_by_season_pos.csv
+
+# ignore all heavy outputs and working artifacts
+out_fast/
+PROD/out_fast/
+PROD/out_tuned/
+PROD/Enriched Route Files/
+PROD/Backup files/
+PROD/routes_final_product.csv
+PROD/routes_run_enriched_all_seasons_final.csv
+PROD/all_seasons_weeks_summary_export.csv
+PROD/all_seasons_weeks_summary_export.csv
+*.docx
+*.png
+*.pdf
+*.xlsx
+~$*
