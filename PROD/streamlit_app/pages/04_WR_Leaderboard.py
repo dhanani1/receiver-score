@@ -1,3 +1,4 @@
+
 import streamlit as st
 import plotly.graph_objects as go
 from utils import load_weekly, add_weekly_rates, aggregate_and_rate
@@ -23,9 +24,10 @@ with st.sidebar:
     weeks     = st.multiselect("Weeks", weeks_all, default=weeks_all)
     teams     = st.multiselect("Offense (Team)", teams_all, default=teams_all)
     view      = st.radio("View", ["Aggregated","Weekly rows"], horizontal=True, index=0)
-    apply_week_min   = st.checkbox("Apply min per-week routes", value=True)
+    # toggles OFF by default
+    apply_week_min   = st.checkbox("Apply min per-week routes", value=False)
     min_week_routes  = st.number_input("Min routes per week", min_value=0, value=10, step=1)
-    apply_season_min = st.checkbox("Apply min season routes (Aggregated only)", value=True)
+    apply_season_min = st.checkbox("Apply min season routes (Aggregated only)", value=False)
     min_season_routes= st.number_input("Min routes per season", min_value=0, value=100, step=1)
 
 mask = (df["Season"].eq(season) & df["Seas_Type"].eq(seas_type) &
@@ -60,7 +62,7 @@ for c in [x for x in ["route_rate_team","target_share_team"] if x in t_out.colum
 DISPLAY_MAP = {
     "Player_Name":"Player","receiver_tier":"Receiver Tier","receiver_score":"Receiver Score",
     "routes_week":"Routes","targets_week":"Targets",
-    "route_rate_team":"Route Rate (team)","target_share_team":"Target Share (team)",
+    "route_rate_team":"Route Rate (team)","target_share_team":"Aimed Target Share (team)",
 }
 cols_disp = [DISPLAY_MAP.get(c, c) for c in cols]
 df_show = t_out[cols].copy()
@@ -72,12 +74,15 @@ if "Receiver Score" in df_show.columns:
 cfg = {"Receiver Score": st.column_config.NumberColumn(format="%.0f"),
        "Routes": st.column_config.NumberColumn(format="%d"),
        "Targets": st.column_config.NumberColumn(format="%d")}
-for c in ["Route Rate (team)","Target Share (team)"]:
+for c in ["Route Rate (team)","Aimed Target Share (team)"]:
     if c in df_show.columns:
         cfg[c] = st.column_config.NumberColumn(format="%.1f%%")
 
 st.caption(f"Players: {len(df_show)}")
-st.dataframe(df_show, use_container_width=True, height=640, hide_index=True, column_config=cfg)
+st.dataframe(
+    df_show,
+    use_container_width=True, height=640, hide_index=True, column_config=cfg
+)
 
 if view == "Aggregated" and not df_show.empty and {"Receiver Score","Routes"}.issubset(df_show.columns):
     fig = go.Figure()

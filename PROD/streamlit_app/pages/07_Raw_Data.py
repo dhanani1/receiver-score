@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -28,11 +29,11 @@ with st.sidebar:
     pos_sel   = st.multiselect("Position", pos_opts, default=pos_opts)
     teams     = st.multiselect("Offense (Team)", teams_all, default=teams_all)
 
-    # defaults you asked for
+    # defaults toggled OFF per request
     view = st.radio("View", ["Aggregated","Weekly rows"], horizontal=True, index=0)
-    apply_week_min   = st.checkbox("Apply min per-week routes", value=True)
+    apply_week_min   = st.checkbox("Apply min per-week routes", value=False)
     min_week_routes  = st.number_input("Min routes per week", min_value=0, value=10, step=1)
-    apply_season_min = st.checkbox("Apply min season routes (Aggregated only)", value=True)
+    apply_season_min = st.checkbox("Apply min season routes (Aggregated only)", value=False)
     min_season_routes= st.number_input("Min routes per season", min_value=0, value=100, step=1)
 
 # ---------- slice ----------
@@ -52,10 +53,12 @@ if apply_week_min and min_week_routes > 0 and "routes_week" in sub_weekly.column
 # ---------- metric sets ----------
 RATE_COLS = [
     # team denominators
-    "route_rate_team","target_share_team","first_read_share_team","design_share_team",
+    "route_rate_team","target_share_team","first_read_share_team",
     # route-scope rates
     "man_win_rate","zone_win_rate","slot_rate","motion_rate","pap_rate","rpo_rate",
     "behind_los_rate","short_rate","intermediate_rate","deep_rate","lt5db_rate",
+    # new route-scope
+    "horizontal_route_rate","condensed_route_rate","designed_reads",
     # target-scope shares
     "catchable_share","contested_share",
     # simple win rate
@@ -66,17 +69,9 @@ BASE_COLS  = ["Season","Seas_Type","Week","Team","Player_Name","db_pos","receive
 
 # ---------- helpers ----------
 def percentize_inplace(frame: pd.DataFrame, cols: list[str]):
-    """
-    Multiply listed columns by 100 for display.
-    Robust to duplicate column labels: if frame[c] is a DataFrame, use the first column.
-    """
     for c in cols:
         if c in frame.columns:
-            val = frame[c]
-            # If duplicates slipped in, selecting c returns a DataFrame — squeeze to 1-D
-            if isinstance(val, pd.DataFrame):
-                val = val.iloc[:, 0]
-            frame[c] = pd.to_numeric(val, errors="coerce") * 100.0
+            frame[c] = pd.to_numeric(frame[c], errors="coerce") * 100.0
 
 def recompute_weekly_team_shares(dfw: pd.DataFrame) -> pd.DataFrame:
     out = dfw.copy()
@@ -84,12 +79,16 @@ def recompute_weekly_team_shares(dfw: pd.DataFrame) -> pd.DataFrame:
         out["route_rate_team"] = out["routes_week"] / out["team_plays_with_route"].replace(0, np.nan)
     if {"targets_week","team_pass_attempts_week"}.issubset(out.columns):
         out["target_share_team"] = out["targets_week"] / out["team_pass_attempts_week"].replace(0, np.nan)
-    if {"first_read_targets_week","team_first_read_attempts_week"}.issubset(out.columns):
-        out["first_read_share_team"] = out["first_read_targets_week"] / out["team_first_read_attempts_week"].replace(0, np.nan)
-    if {"design_targets_week","team_design_read_attempts_week"}.issubset(out.columns):
-        out["design_share_team"] = out["design_targets_week"] / out["team_design_read_attempts_week"].replace(0, np.nan)
+    # NEW: 1st-read share uses (first + design) / (team_first + team_design)
+    if {"first_read_targets_week","design_targets_week","team_first_read_attempts_week","team_design_read_attempts_week"}.issubset(out.columns):
+        out["first_read_share_team"] = (out["first_read_targets_week"] + out["design_targets_week"]) / \
+                                       (out["team_first_read_attempts_week"] + out["team_design_read_attempts_week"]).replace(0, np.nan)
+    # NEW: designed reads (per-route)
+    if {"design_targets_week","routes_week"}.issubset(out.columns):
+        out["designed_reads"] = out["design_targets_week"] / out["routes_week"].replace(0, np.nan)
     if {"route_wins_week","routes_week"}.issubset(out.columns):
         out["win_rate"] = out["route_wins_week"] / out["routes_week"].replace(0, np.nan)
+    # new weekly rates handled via add_weekly_rates, but keep here for safety
     return out
 
 def recompute_aggregated_team_shares_per_player(disp_agg: pd.DataFrame, weekly_source: pd.DataFrame) -> pd.DataFrame:
@@ -131,11 +130,16 @@ def recompute_aggregated_team_shares_per_player(disp_agg: pd.DataFrame, weekly_s
 
     merged["route_rate_team"]       = merged.apply(lambda r: _sd(r["routes_week_sum"], r["team_plays_with_route_sum"]), axis=1)
     merged["target_share_team"]     = merged.apply(lambda r: _sd(r["targets_week_sum"], r["team_pass_attempts_week_sum"]), axis=1)
-    merged["first_read_share_team"] = merged.apply(lambda r: _sd(r["first_read_targets_week_sum"], r["team_first_read_attempts_week_sum"]), axis=1)
-    merged["design_share_team"]     = merged.apply(lambda r: _sd(r["design_targets_week_sum"], r["team_design_read_attempts_week_sum"]), axis=1)
+    # NEW: first-read share team per spec
+    merged["first_read_share_team"] = merged.apply(lambda r: _sd(
+        r["first_read_targets_week_sum"] + r["design_targets_week_sum"],
+        r["team_first_read_attempts_week_sum"] + r["team_design_read_attempts_week_sum"]
+    ), axis=1)
+    # NEW: designed reads (per-route)
+    merged["designed_reads"]        = merged.apply(lambda r: _sd(r["design_targets_week_sum"], r["routes_week_sum"]), axis=1)
     merged["win_rate"]              = merged.apply(lambda r: _sd(r["route_wins_week_sum"], r["routes_week_sum"]), axis=1)
 
-    keep = list(disp_agg.columns) + ["route_rate_team","target_share_team","first_read_share_team","design_share_team","win_rate"]
+    keep = list(disp_agg.columns) + ["route_rate_team","target_share_team","first_read_share_team","designed_reads","win_rate"]
     return merged[keep]
 
 # ---------- build table ----------
@@ -146,7 +150,6 @@ if view == "Weekly rows":
     cols = [c for c in BASE_COLS + COUNT_COLS + RATE_COLS if c in disp.columns]
 
     disp_out = disp.copy()
-    # de-duplicate BEFORE percentize (prevents Series/DataFrame ambiguity)
     disp_out = disp_out.loc[:, ~disp_out.columns.duplicated()]
     percentize_inplace(disp_out, [c for c in RATE_COLS if c in disp_out.columns])
 
@@ -164,7 +167,6 @@ else:
     cols = [c for c in BASE_COLS + COUNT_COLS + RATE_COLS if c in disp.columns]
 
     disp_out = disp.copy()
-    # de-duplicate BEFORE percentize here as well
     disp_out = disp_out.loc[:, ~disp_out.columns.duplicated()]
     percentize_inplace(disp_out, [c for c in RATE_COLS if c in disp_out.columns])
 
@@ -175,12 +177,14 @@ DISPLAY_MAP = {
     "receiver_tier":"Receiver Tier", "receiver_score":"Receiver Score",
     "routes_week":"Routes", "targets_week":"Targets",
     "receptions_week":"Receptions", "receiving_yards_week":"Receiving Yards",
-    "route_rate_team":"Route Rate (team)", "target_share_team":"Target Share (team)",
-    "first_read_share_team":"1st-Read Share (team)", "design_share_team":"Design-Read Share (team)",
+    "route_rate_team":"Route Rate (team)", "target_share_team":"Aimed Target Share (team)",
+    "first_read_share_team":"1st-Read Share (team)", "designed_reads":"Designed Reads",
     "man_win_rate":"Man Win Rate", "zone_win_rate":"Zone Win Rate", "slot_rate":"Slot Rate",
     "motion_rate":"Motion Rate", "pap_rate":"Play-Action Rate", "rpo_rate":"RPO Rate",
     "behind_los_rate":"Behind-the-LOS Rate", "short_rate":"Short Rate", "intermediate_rate":"Intermediate Rate",
     "deep_rate":"Deep Rate", "lt5db_rate":"<5 DB Rate",
+    "horizontal_route_rate":"Horizontal Route Rate",
+    "condensed_route_rate":"Condensed Route Rate",
     "catchable_share":"Catchable Share", "contested_share":"Contested Share",
     "win_rate":"Win Rate",
 }
@@ -202,9 +206,10 @@ cfg = {
     "Receiving Yards": st.column_config.NumberColumn(format="%d"),
 }
 percent_labels = [
-    "Route Rate (team)","Target Share (team)","1st-Read Share (team)","Design-Read Share (team)",
+    "Route Rate (team)","Aimed Target Share (team)","1st-Read Share (team)","Designed Reads",
     "Man Win Rate","Zone Win Rate","Slot Rate","Motion Rate","Play-Action Rate","RPO Rate",
     "Behind-the-LOS Rate","Short Rate","Intermediate Rate","Deep Rate","<5 DB Rate",
+    "Horizontal Route Rate","Condensed Route Rate",
     "Catchable Share","Contested Share","Win Rate",
 ]
 for lab in percent_labels:

@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -62,7 +63,7 @@ prev_rates = add_weekly_rates(prev).copy()
 cur_rates["win_rate"]  = pd.to_numeric(cur_rates.get("route_wins_week",0), errors="coerce") / pd.to_numeric(cur_rates.get("routes_week",0), errors="coerce")
 prev_rates["win_rate"] = pd.to_numeric(prev_rates.get("route_wins_week",0), errors="coerce") / pd.to_numeric(prev_rates.get("routes_week",0), errors="coerce")
 
-# ---------- tier-aware aggregated Receiver Score (matches Comparison/Leaderboards) ----------
+# ---------- tier-aware aggregated Receiver Score (matches Leaderboards) ----------
 prof_agg = aggregate_and_rate(cur, apply_week_min=False, group_by_team=False, attach_primary_team=False)
 prof_rs  = float(prof_agg["receiver_score"].iloc[0]) if "receiver_score" in prof_agg.columns and len(prof_agg) else np.nan
 
@@ -79,10 +80,10 @@ METRICS = [
     ("Routes","routes_week"),
     ("Targets","targets_week"),
     # team-denominator shares
-    ("Route Rate","route_rate_team"),
-    ("Target Share","target_share_team"),
-    ("1st-Read Share","first_read_share_team"),
-    ("Design-Read Share","design_share_team"),
+    ("Route Rate (team)","route_rate_team"),
+    ("Aimed Target Share (team)","target_share_team"),
+    ("1st-Read Share (team)","first_read_share_team"),
+    ("Designed Reads","designed_reads"),
     # modeled situational rates
     ("Man Win Rate","man_win_rate"),
     ("Zone Win Rate","zone_win_rate"),
@@ -95,22 +96,22 @@ METRICS = [
     ("Intermediate Rate","intermediate_rate"),
     ("Deep Rate","deep_rate"),
     ("<5 DB Rate","lt5db_rate"),
+    ("Horizontal Route Rate","horizontal_route_rate"),
+    ("Condensed Route Rate","condensed_route_rate"),
     ("Catchable Share","catchable_share"),
     ("Contested Share","contested_share"),
 ]
 name2col = {d:c for d,c in METRICS}
-is_pct_label = lambda s: ("Rate" in s) or ("Share" in s) or (s == "Win Rate")
+def is_pct_label(s: str) -> bool:
+    return ("Rate" in s) or ("Share" in s) or (s in {"Win Rate","Designed Reads","Horizontal Route Rate","Condensed Route Rate"})
 
 # Aggregated value for the two metric tiles:
 def agg_metric_value(label: str) -> float:
     col = name2col[label]
     if col == "receiver_score":
-        # Use tier-aware aggregated Receiver Score (NOT avg of weekly scores)
         return prof_rs
     if col in ["routes_week","targets_week"]:
-        # For counts we show sums across the window
         return tot_routes if col == "routes_week" else tot_targets
-    # For rates/shares, show the mean of weekly rates in the window
     return pd.to_numeric(cur_rates.get(col, np.nan), errors="coerce").mean()
 
 left, right = st.columns(2)

@@ -82,12 +82,13 @@ def compute_all_metrics(cohort: pd.DataFrame) -> dict:
         return {k: np.nan for k in [
             # Stats
             "Receptions","Targets","Receiving Yards","Routes","receiver_score",
-            "route_rate_team","target_share_team",
+            "route_rate_team","target_share_team","tprr",
             # Explainer
             "first_read_share_team","design_share_team",
             "man_win_rate","zone_win_rate","slot_rate","motion_rate","pap_rate","rpo_rate",
             "behind_los_rate","short_rate","intermediate_rate","deep_rate","lt5db_rate",
             "catchable_share","contested_share","win_rate",
+            "horizontal_route_rate","condensed_route_rate",
         ]}
 
     # Counts
@@ -121,6 +122,9 @@ def compute_all_metrics(cohort: pd.DataFrame) -> dict:
     route_wins = _sum(cohort.get("route_wins_week", 0))
     catchable  = _sum(cohort.get("catchable_targets_week", 0))
     contested  = _sum(cohort.get("contested_targets_week", 0))
+    # NEW numerators for the two explainer rates
+    horiz_rts  = _sum(cohort.get("horizontal_routes_week", 0))
+    plays_leq3 = _sum(cohort.get("plays_leq3_total_routes_week", 0))
 
     # Shares & rates
     route_rate_team       = _safe_div(routes, t_plays)
@@ -143,9 +147,16 @@ def compute_all_metrics(cohort: pd.DataFrame) -> dict:
     contested_share = _safe_div(contested, targets)
     win_rate = _safe_div(route_wins, routes)
 
+    # NEW: the two explainer rates you asked for
+    horizontal_route_rate = _safe_div(horiz_rts, routes)
+    condensed_route_rate  = _safe_div(plays_leq3, routes)
+
     # Tier-aware Receiver Score
     agg = aggregate_and_rate(cohort, apply_week_min=False, group_by_team=False, attach_primary_team=False)
     receiver_score = float(agg.get("receiver_score", pd.Series([np.nan])).iloc[0]) if len(agg) else np.nan
+
+    # NEW: TPRR for Stats = targets / routes
+    tprr = _safe_div(targets, routes)
 
     return {
         # Stats table fields
@@ -156,6 +167,7 @@ def compute_all_metrics(cohort: pd.DataFrame) -> dict:
         "receiver_score": receiver_score,
         "route_rate_team": route_rate_team,
         "target_share_team": target_share_team,
+        "tprr": tprr,
         # Explainer fields
         "first_read_share_team": first_read_share_team,
         "design_share_team": design_share_team,
@@ -173,6 +185,8 @@ def compute_all_metrics(cohort: pd.DataFrame) -> dict:
         "catchable_share": catchable_share,
         "contested_share": contested_share,
         "win_rate": win_rate,
+        "horizontal_route_rate": horizontal_route_rate,
+        "condensed_route_rate": condensed_route_rate,
     }
 
 def build_tables(A: pd.DataFrame, B: pd.DataFrame):
@@ -194,6 +208,9 @@ def build_tables(A: pd.DataFrame, B: pd.DataFrame):
         ("Intermediate Rate", "intermediate_rate"),
         ("Deep Rate", "deep_rate"),
         ("<5 DB Rate", "lt5db_rate"),
+        # NEW in Explainer:
+        ("Horizontal Route Rate", "horizontal_route_rate"),
+        ("Condensed Route Rate", "condensed_route_rate"),
         ("Catchable Share", "catchable_share"),
         ("Contested Share", "contested_share"),
         ("Win Rate", "win_rate"),
@@ -204,7 +221,7 @@ def build_tables(A: pd.DataFrame, B: pd.DataFrame):
     # Explainer: all percents → ×100
     df_expl[["A","B","Δ (A–B)"]] = df_expl[["A","B","Δ (A–B)"]].astype(float) * 100.0
 
-    # Stats metrics (counts + route/target share + receiver score)
+    # Stats metrics (counts + route/target share + receiver score + TPRR)
     stat_metrics = [
         ("Receptions","Receptions"),
         ("Targets","Targets"),
@@ -212,20 +229,21 @@ def build_tables(A: pd.DataFrame, B: pd.DataFrame):
         ("Routes","Routes"),
         ("Receiver Score","receiver_score"),
         ("Route Rate (team)","route_rate_team"),   # %
-        ("Target Share (team)","target_share_team")# %
+        ("Target Share (team)","target_share_team"),# %
+        ("TPRR","tprr"),                            # NEW %
     ]
     rows_stats = [(lab, a[k], b[k], (a[k]-b[k]) if (pd.notna(a[k]) and pd.notna(b[k])) else np.nan)
                   for lab,k in stat_metrics]
     df_stats = pd.DataFrame(rows_stats, columns=["Metric","A","B","Δ (A–B)"])
 
-    # Format: counts & score as ints; Route/Target Share as percents w/ % sign
+    # Format: counts & score as ints; shares & TPRR as percents
     count_or_score = {"Receptions","Targets","Receiving Yards","Routes","Receiver Score"}
     for m in count_or_score:
         mask = df_stats["Metric"].eq(m)
         df_stats.loc[mask, ["A","B","Δ (A–B)"]] = df_stats.loc[mask, ["A","B","Δ (A–B)"]].applymap(
             lambda x: "" if pd.isna(x) else f"{float(x):.0f}"
         )
-    for m in ["Route Rate (team)","Target Share (team)"]:
+    for m in ["Route Rate (team)","Target Share (team)","TPRR"]:
         mask = df_stats["Metric"].eq(m)
         df_stats.loc[mask, ["A","B","Δ (A–B)"]] = (df_stats.loc[mask, ["A","B","Δ (A–B)"]]
             .astype(float).applymap(lambda x: "" if pd.isna(x) else f"{x*100:.1f}%"))
@@ -295,7 +313,7 @@ st.dataframe(
 )
 
 st.subheader("Stats (counts, score, and team shares)")
-# Values are already formatted as strings per-row (ints for counts/score; percents for shares)
+# Values are already formatted per-row (ints for counts/score; percents for shares/TPRR)
 st.dataframe(
     stats_tbl, use_container_width=True, height=420, hide_index=True,
     column_config={

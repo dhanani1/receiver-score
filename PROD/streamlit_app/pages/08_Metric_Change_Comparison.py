@@ -32,11 +32,12 @@ if latest is not None:
 teams_all = sorted(df['Team'].dropna().astype(str).unique().tolist())
 pos_opts  = ["WR","TE","RB","FB"]
 
-# Metric catalog — explainer (percent metrics) + Receiver Score
+# Metric catalog — now includes new rates
 METRICS = [
-    ("Receiver Score", "receiver_score"),  # 0–100, tier-indexed
+    ("Receiver Score", "receiver_score"),
+    ("Aimed Target Share (team)", "target_share_team"),
     ("1st-Read Share (team)", "first_read_share_team"),
-    ("Design-Read Share (team)", "design_share_team"),
+    ("Designed Reads", "designed_reads"),
     ("Man Win Rate", "man_win_rate"),
     ("Zone Win Rate", "zone_win_rate"),
     ("Slot Rate", "slot_rate"),
@@ -48,6 +49,8 @@ METRICS = [
     ("Intermediate Rate", "intermediate_rate"),
     ("Deep Rate", "deep_rate"),
     ("<5 DB Rate", "lt5db_rate"),
+    ("Horizontal Route Rate","horizontal_route_rate"),
+    ("Condensed Route Rate","condensed_route_rate"),
     ("Catchable Share", "catchable_share"),
     ("Contested Share", "contested_share"),
     ("Win Rate", "win_rate"),
@@ -62,7 +65,6 @@ with st.sidebar:
 
     st.divider()
     st.header("Filter Set A")
-    # Defaults: current year (latest), REG, all weeks, all teams/positions
     A_season = st.selectbox("A: Season", seasons, index=(seasons.index(latest) if latest in seasons else 0))
     A_type   = st.radio("A: Season Type", ["REG","POST"], horizontal=True, index=0)
     A_weeks_all = weeks_for(A_season, A_type)
@@ -76,7 +78,6 @@ with st.sidebar:
 
     st.divider()
     st.header("Filter Set B")
-    # Defaults: previous season if available (else latest), REG, all weeks, all teams/positions
     default_B_index = seasons.index(prev_season) if prev_season in seasons else (seasons.index(latest) if latest in seasons else 0)
     B_season = st.selectbox("B: Season", seasons, index=default_B_index)
     B_type   = st.radio("B: Season Type", ["REG","POST"], horizontal=True, index=0, key="B_type")
@@ -85,7 +86,8 @@ with st.sidebar:
     B_pos    = st.multiselect("B: Position", pos_opts, default=pos_opts, key="B_pos")
     B_teams  = st.multiselect("B: Offense (Team)", teams_all, default=teams_all, key="B_teams")
     B_min_rt = st.number_input("B: Min routes / week", min_value=0, value=0, step=1, key="B_min_rt")
-    B_season_min_toggle = st.radio("B: Apply min routes per season?", ["Off","On"], horizontal=True, index=1, key="B_season_min_toggle")
+    # default toggled OFF now
+    B_season_min_toggle = st.radio("B: Apply min routes per season?", ["Off","On"], horizontal=True, index=0, key="B_season_min_toggle")
     B_min_season_routes = st.number_input("B: Min routes per season", min_value=0, value=100, step=10,
                                           key="B_min_season_routes", disabled=(B_season_min_toggle=="Off"))
 
@@ -105,9 +107,6 @@ def _slice(season: int, seas_type: str, weeks: list[int], pos_list: list[str], t
     return df[m].copy()
 
 def _primary_team(frame: pd.DataFrame) -> pd.DataFrame:
-    """
-    For each player, choose the team with max routes in the supplied window.
-    """
     if frame.empty or "routes_week" not in frame.columns:
         return frame[["Player_ID"]].drop_duplicates().assign(Team=np.nan)
     grouped = (frame.groupby(["Player_ID","Team"], dropna=False)["routes_week"].sum().reset_index())
@@ -117,12 +116,6 @@ def _primary_team(frame: pd.DataFrame) -> pd.DataFrame:
 
 def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes: int,
                               apply_season_min: bool, min_season_routes: int) -> pd.DataFrame:
-    """
-    For percent metrics: Σ numerators / Σ denominators per player.
-    For Receiver Score: use aggregate_and_rate(...) to get the 0–100 score.
-    Applies per-week route filter BEFORE aggregation, and optional min season routes AFTER aggregation.
-    Returns: Player_ID, Player_Name, db_pos, Team, value, routes_sum (for season-min filtering)
-    """
     f = frame.copy()
     if f.empty:
         return pd.DataFrame(columns=["Player_ID","Player_Name","db_pos","Team","value","routes_sum"])
@@ -135,7 +128,6 @@ def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes:
             group_by_team=False,
             attach_primary_team=True
         )
-        # routes for filtering
         routes_col = "routes_week" if "routes_week" in agg.columns else None
         if routes_col is None:
             agg["routes_sum"] = np.nan
@@ -159,7 +151,6 @@ def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes:
     if f_use.empty:
         return pd.DataFrame(columns=["Player_ID","Player_Name","db_pos","Team","value","routes_sum"])
 
-    # Pre-aggregate sums we need
     agg = (f_use.groupby(["Player_ID","Player_Name","db_pos"], dropna=False)
             .agg(
                 routes=("routes_week","sum"),
@@ -188,19 +179,22 @@ def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes:
                 contested_targets=("contested_targets_week","sum"),
                 first_read_targets=("first_read_targets_week","sum"),
                 design_targets=("design_targets_week","sum"),
+                # new
+                horizontal_routes=("horizontal_routes_week","sum"),
+                plays_leq3=("plays_leq3_total_routes_week","sum"),
             ).reset_index())
 
-    # Optional season-min filtering using aggregated route count
     agg["routes_sum"] = pd.to_numeric(agg["routes"], errors="coerce")
     if apply_season_min and min_season_routes:
         agg = agg[agg["routes_sum"] >= int(min_season_routes)]
 
-    # Compute metric value
     def _value(row) -> float:
+        if metric == "target_share_team":
+            return _safe_div(row["targets"], row["team_pa"])
         if metric == "first_read_share_team":
-            return _safe_div(row["first_read_targets"], row["team_fr"])
-        if metric == "design_share_team":
-            return _safe_div(row["design_targets"], row["team_dr"])
+            return _safe_div(row["first_read_targets"] + row["design_targets"], row["team_fr"] + row["team_dr"])
+        if metric == "designed_reads":
+            return _safe_div(row["design_targets"], row["routes"])
         if metric == "man_win_rate":
             return _safe_div(row["man_wins"], row["man_routes"])
         if metric == "zone_win_rate":
@@ -229,9 +223,12 @@ def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes:
             return _safe_div(row["contested_targets"], row["targets"])
         if metric == "win_rate":
             return _safe_div(row["route_wins"], row["routes"])
+        if metric == "horizontal_route_rate":
+            return _safe_div(row["horizontal_routes"], row["routes"])
+        if metric == "condensed_route_rate":
+            return _safe_div(row["plays_leq3"], row["routes"])
         return np.nan
 
-    # Attach primary team
     team_map = _primary_team(f_use)
     agg = agg.merge(team_map, on="Player_ID", how="left")
 
@@ -254,7 +251,6 @@ B_tbl = compute_metric_per_player(B, metric_col, int(B_min_rt),
 A_tbl = A_tbl[pd.notna(A_tbl["value"])].copy()
 
 # ---------- Join & format ----------
-# Left-join on A → only players with A values appear
 merged = A_tbl.merge(B_tbl, on="Player_ID", how="left", suffixes=("_A","_B"))
 merged["Player"]   = merged["Player_Name_A"]
 merged["Team"]     = merged["Team_A"]
@@ -270,7 +266,6 @@ merged[D_col] = merged[A_col] - merged[B_col]
 
 is_pct = metric_col in PCT_METRIC_KEYS
 
-# Build display frame
 out = merged[["Player","Team","Position",A_col,B_col,D_col]].copy()
 if is_pct:
     out[A_col] = out[A_col] * 100.0
