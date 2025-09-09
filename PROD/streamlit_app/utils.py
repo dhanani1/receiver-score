@@ -1,3 +1,4 @@
+
 # /Users/Zain/fantasy_wwr/PROD/streamlit_app/utils.py
 from __future__ import annotations
 from pathlib import Path
@@ -52,6 +53,8 @@ def load_weekly() -> pd.DataFrame:
         "lt5db_routes_week",
         "first_read_targets_week","design_targets_week",
         "catchable_targets_week","contested_targets_week",
+        # new weekly counters
+        "horizontal_routes_week","plays_leq3_total_routes_week","plays_wr_routes_leq1_week",
     ]
     for c in numeric_cols:
         if c in df.columns:
@@ -130,6 +133,10 @@ RATE_DEFS: List[Tuple[str,str,str]] = [
     ("lt5db_rate",    "lt5db_routes_week","routes_week"),
     ("catchable_share","catchable_targets_week","targets_week"),
     ("contested_share","contested_targets_week","targets_week"),
+    # new:
+    ("horizontal_route_rate","horizontal_routes_week","routes_week"),
+    ("condensed_route_rate","plays_leq3_total_routes_week","routes_week"),
+    ("designed_reads","design_targets_week","routes_week"),
 ]
 
 def add_weekly_rates(df: pd.DataFrame) -> pd.DataFrame:
@@ -143,11 +150,17 @@ def add_weekly_rates(df: pd.DataFrame) -> pd.DataFrame:
     if {"routes_week","team_plays_with_route"}.issubset(f.columns):
         f["route_rate_team"] = f.apply(lambda r: safe_rate(r["routes_week"], r["team_plays_with_route"]), axis=1)
     if {"targets_week","team_pass_attempts_week"}.issubset(f.columns):
+        # Rename in UI only; column id stays target_share_team
         f["target_share_team"] = f.apply(lambda r: safe_rate(r["targets_week"], r["team_pass_attempts_week"]), axis=1)
-    if {"first_read_targets_week","team_first_read_attempts_week"}.issubset(f.columns):
-        f["first_read_share_team"] = f.apply(lambda r: safe_rate(r["first_read_targets_week"], r["team_first_read_attempts_week"]), axis=1)
-    if {"design_targets_week","team_design_read_attempts_week"}.issubset(f.columns):
-        f["design_share_team"] = f.apply(lambda r: safe_rate(r["design_targets_week"], r["team_design_read_attempts_week"]), axis=1)
+    # NEW: First Read (team) = (first + design) / (team_first + team_design)
+    if {"first_read_targets_week","design_targets_week","team_first_read_attempts_week","team_design_read_attempts_week"}.issubset(f.columns):
+        f["first_read_share_team"] = f.apply(
+            lambda r: safe_rate(
+                float(r.get("first_read_targets_week",0)) + float(r.get("design_targets_week",0)),
+                float(r.get("team_first_read_attempts_week",0)) + float(r.get("team_design_read_attempts_week",0))
+            ), axis=1
+        )
+    # Designed Reads already computed via RATE_DEFS as 'designed_reads'
     return f
 
 # ---------- Aggregation to PLAYER (Σnums / Σdens) + tier-indexed Receiver Score ----------
@@ -163,9 +176,8 @@ def aggregate_and_rate(
     Aggregates the provided slice to PLAYER (or PLAYER+TEAM) and computes:
       • season_wwr = Σ WWR_ML_numerator / Σ WWR_ML_denominator
       • receiver_score = piecewise(season_wwr; season+pos_group tiers)
-      • team shares: route_rate_team / target_share_team /
-                     first_read_share_team / design_share_team
-      • standard rates: man/zone/slot/motion/... (sum(num)/sum(den))
+      • team shares: route_rate_team / target_share_team / first_read_share_team
+      • derived rates: man/zone/slot/motion/..., horizontal_route_rate, condensed_route_rate, designed_reads
     """
     if frame is None or frame.empty:
         return frame.copy()
@@ -186,14 +198,17 @@ def aggregate_and_rate(
         # team denominators for shares
         "team_plays_with_route","team_pass_attempts_week",
         "team_first_read_attempts_week","team_design_read_attempts_week",
+        # new rate numerators
+        "horizontal_routes_week","plays_leq3_total_routes_week",
     ])
-    for _, num, den in RATE_DEFS:
+    # add standard rate parts
+    for out, num, den in RATE_DEFS:
         sum_cols.add(num); sum_cols.add(den)
     sum_cols = [c for c in sum_cols if c in f.columns]
 
     g = f.groupby(keys, dropna=False)[sum_cols].sum(numeric_only=True).reset_index()
 
-    # recompute standard rates
+    # recompute standard/added rates
     for out, num, den in RATE_DEFS:
         if num in g.columns and den in g.columns:
             g[out] = g.apply(lambda r: safe_rate(r.get(num,0), r.get(den,0)), axis=1)
@@ -201,8 +216,15 @@ def aggregate_and_rate(
     # team-denominator shares
     g["route_rate_team"]       = g.apply(lambda r: safe_rate(r.get("routes_week",0), r.get("team_plays_with_route",0)), axis=1)
     g["target_share_team"]     = g.apply(lambda r: safe_rate(r.get("targets_week",0), r.get("team_pass_attempts_week",0)), axis=1)
-    g["first_read_share_team"] = g.apply(lambda r: safe_rate(r.get("first_read_targets_week",0), r.get("team_first_read_attempts_week",0)), axis=1)
-    g["design_share_team"]     = g.apply(lambda r: safe_rate(r.get("design_targets_week",0), r.get("team_design_read_attempts_week",0)), axis=1)
+    # NEW: First Read (team) = (first + design) / (team_first + team_design)
+    if {"first_read_targets_week","design_targets_week","team_first_read_attempts_week","team_design_read_attempts_week"}.issubset(g.columns):
+        g["first_read_share_team"] = g.apply(
+            lambda r: safe_rate(
+                float(r.get("first_read_targets_week",0)) + float(r.get("design_targets_week",0)),
+                float(r.get("team_first_read_attempts_week",0)) + float(r.get("team_design_read_attempts_week",0))
+            ), axis=1
+        )
+    # designed_reads already computed as design_targets_week / routes_week
 
     # ΣWWR and tier-indexed Receiver Score
     den = pd.to_numeric(g.get("WWR_ML_denominator",0), errors="coerce")
@@ -251,24 +273,27 @@ def aggregate_and_rate(
     return g.loc[:, ~g.columns.duplicated()]
 
 # ---------- Comparison explainer (drivers; TEAM denominators where applicable) ----------
+# We keep a label-oriented list and handle special formulas inside the builder.
 DRIVERS: List[Tuple[str,str,str]] = [
-    ("Route rate",                 "routes_week",              "team_plays_with_route"),
-    ("Target share",               "targets_week",             "team_pass_attempts_week"),
-    ("1st-read share",             "first_read_targets_week",  "team_first_read_attempts_week"),
-    ("Design-read share",          "design_targets_week",      "team_design_read_attempts_week"),
-    ("Behind LOS rate",            "behind_los_routes_week",   "routes_week"),
-    ("Short rate",                 "short_routes_week",        "routes_week"),
-    ("Intermediate rate",          "intermediate_routes_week", "routes_week"),
-    ("Deep rate",                  "deep_routes_week",         "routes_week"),
-    ("Man rate",                   "man_routes_week",          "routes_week"),
-    ("Zone rate",                  "zone_routes_week",         "routes_week"),
-    ("Slot rate",                  "slot_routes_week",         "routes_week"),
-    ("Motion rate",                "motion_routes_week",       "routes_week"),
-    ("Play-action rate",           "pap_routes_week",          "routes_week"),
-    ("RPO rate",                   "rpo_routes_week",          "routes_week"),
-    ("vs <5 DB rate",              "lt5db_routes_week",        "routes_week"),
-    ("Catchable share (targeted)", "catchable_targets_week",   "targets_week"),
-    ("Contested share (targeted)", "contested_targets_week",   "targets_week"),
+    ("Route rate (team)",            "routes_week",              "team_plays_with_route"),
+    ("Aimed target share (team)",    "targets_week",             "team_pass_attempts_week"),
+    ("1st-read share (team)",        "first_read_targets_week",  "team_first_read_attempts_week"),  # will combine with design in _driver_table
+    ("Designed reads",               "design_targets_week",      "routes_week"),
+    ("Behind LOS rate",              "behind_los_routes_week",   "routes_week"),
+    ("Short rate",                   "short_routes_week",        "routes_week"),
+    ("Intermediate rate",            "intermediate_routes_week", "routes_week"),
+    ("Deep rate",                    "deep_routes_week",         "routes_week"),
+    ("Man rate",                     "man_routes_week",          "routes_week"),
+    ("Zone rate",                    "zone_routes_week",         "routes_week"),
+    ("Slot rate",                    "slot_routes_week",         "routes_week"),
+    ("Motion rate",                  "motion_routes_week",       "routes_week"),
+    ("Play-action rate",             "pap_routes_week",          "routes_week"),
+    ("RPO rate",                     "rpo_routes_week",          "routes_week"),
+    ("vs <5 DB rate",                "lt5db_routes_week",        "routes_week"),
+    ("Horizontal route rate",        "horizontal_routes_week",   "routes_week"),
+    ("Condensed route rate",         "plays_leq3_total_routes_week","routes_week"),
+    ("Catchable share (targeted)",   "catchable_targets_week",   "targets_week"),
+    ("Contested share (targeted)",   "contested_targets_week",   "targets_week"),
 ]
 
 def _rate(n, d) -> float:
@@ -279,8 +304,14 @@ def _rate(n, d) -> float:
 def _driver_table(cohort: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for label, num_col, den_col in DRIVERS:
-        num = pd.to_numeric(cohort.get(num_col, 0), errors="coerce").sum()
-        den = pd.to_numeric(cohort.get(den_col, 0), errors="coerce").sum()
+        if label == "1st-read share (team)":
+            num = pd.to_numeric(cohort.get("first_read_targets_week", 0), errors="coerce").sum() + \
+                  pd.to_numeric(cohort.get("design_targets_week", 0), errors="coerce").sum()
+            den = pd.to_numeric(cohort.get("team_first_read_attempts_week", 0), errors="coerce").sum() + \
+                  pd.to_numeric(cohort.get("team_design_read_attempts_week", 0), errors="coerce").sum()
+        else:
+            num = pd.to_numeric(cohort.get(num_col, 0), errors="coerce").sum()
+            den = pd.to_numeric(cohort.get(den_col, 0), errors="coerce").sum()
         rows.append({"label": label, "num": float(num), "den": float(den), "rate": _rate(num, den)})
     return pd.DataFrame(rows)
 
