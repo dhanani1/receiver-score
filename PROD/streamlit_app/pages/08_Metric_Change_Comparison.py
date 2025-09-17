@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -32,7 +31,7 @@ if latest is not None:
 teams_all = sorted(df['Team'].dropna().astype(str).unique().tolist())
 pos_opts  = ["WR","TE","RB","FB"]
 
-# Metric catalog — now includes new rates
+# Metric catalog (no Total Routes here; it will always be shown as fixed columns)
 METRICS = [
     ("Receiver Score", "receiver_score"),
     ("Aimed Target Share (team)", "target_share_team"),
@@ -56,7 +55,15 @@ METRICS = [
     ("Win Rate", "win_rate"),
 ]
 name2col = {d:c for d,c in METRICS}
-PCT_METRIC_KEYS = {c for _, c in METRICS if c != "receiver_score"}
+
+# Which metrics are percents (for table formatting)
+PCT_METRIC_KEYS = {
+    "target_share_team","first_read_share_team","designed_reads",
+    "man_win_rate","zone_win_rate","slot_rate","motion_rate","pap_rate","rpo_rate",
+    "behind_los_rate","short_rate","intermediate_rate","deep_rate","lt5db_rate",
+    "horizontal_route_rate","condensed_route_rate",
+    "catchable_share","contested_share","win_rate",
+}
 
 with st.sidebar:
     st.header("Metric")
@@ -86,7 +93,6 @@ with st.sidebar:
     B_pos    = st.multiselect("B: Position", pos_opts, default=pos_opts, key="B_pos")
     B_teams  = st.multiselect("B: Offense (Team)", teams_all, default=teams_all, key="B_teams")
     B_min_rt = st.number_input("B: Min routes / week", min_value=0, value=0, step=1, key="B_min_rt")
-    # default toggled OFF now
     B_season_min_toggle = st.radio("B: Apply min routes per season?", ["Off","On"], horizontal=True, index=0, key="B_season_min_toggle")
     B_min_season_routes = st.number_input("B: Min routes per season", min_value=0, value=100, step=10,
                                           key="B_min_season_routes", disabled=(B_season_min_toggle=="Off"))
@@ -120,6 +126,7 @@ def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes:
     if f.empty:
         return pd.DataFrame(columns=["Player_ID","Player_Name","db_pos","Team","value","routes_sum"])
 
+    # Receiver Score path
     if metric == "receiver_score":
         agg = aggregate_and_rate(
             f,
@@ -144,7 +151,7 @@ def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes:
         out = agg[keep_cols].rename(columns={"receiver_score":"value"})
         return out
 
-    # ---- percent metrics path ----
+    # Percent/other metrics
     f_use = f.copy()
     if min_week_routes and "routes_week" in f_use.columns:
         f_use = f_use[f_use["routes_week"] >= int(min_week_routes)]
@@ -156,12 +163,10 @@ def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes:
                 routes=("routes_week","sum"),
                 targets=("targets_week","sum"),
                 route_wins=("route_wins_week","sum"),
-                # team denominators
                 team_plays=("team_plays_with_route","sum"),
                 team_pa=("team_pass_attempts_week","sum"),
                 team_fr=("team_first_read_attempts_week","sum"),
                 team_dr=("team_design_read_attempts_week","sum"),
-                # numerators used by rates
                 man_wins=("man_wins_week","sum"),
                 man_routes=("man_routes_week","sum"),
                 zone_wins=("zone_wins_week","sum"),
@@ -179,7 +184,6 @@ def compute_metric_per_player(frame: pd.DataFrame, metric: str, min_week_routes:
                 contested_targets=("contested_targets_week","sum"),
                 first_read_targets=("first_read_targets_week","sum"),
                 design_targets=("design_targets_week","sum"),
-                # new
                 horizontal_routes=("horizontal_routes_week","sum"),
                 plays_leq3=("plays_leq3_total_routes_week","sum"),
             ).reset_index())
@@ -256,17 +260,25 @@ merged["Player"]   = merged["Player_Name_A"]
 merged["Team"]     = merged["Team_A"]
 merged["Position"] = merged["db_pos_A"]
 
+# Always-present Total Routes columns (integers)
+merged["Total Routes — A"] = pd.to_numeric(merged["routes_sum_A"], errors="coerce").round(0)
+merged["Total Routes — B"] = pd.to_numeric(merged["routes_sum_B"], errors="coerce").round(0)
+
+# Selected metric columns
 A_col = f"{metric_label} — A"
 B_col = f"{metric_label} — B"
 D_col = "Δ (A–B)"
-
 merged[A_col] = pd.to_numeric(merged["value_A"], errors="coerce")
 merged[B_col] = pd.to_numeric(merged["value_B"], errors="coerce")
 merged[D_col] = merged[A_col] - merged[B_col]
 
 is_pct = metric_col in PCT_METRIC_KEYS
 
-out = merged[["Player","Team","Position",A_col,B_col,D_col]].copy()
+# Build display frame (Player, Team, Position, Total Routes A/B, Metric A/B, Δ)
+cols_order = ["Player","Team","Position","Total Routes — A","Total Routes — B",A_col,B_col,D_col]
+out = merged[cols_order].copy()
+
+# Percent formatting for selected metric
 if is_pct:
     out[A_col] = out[A_col] * 100.0
     out[B_col] = out[B_col] * 100.0
@@ -282,6 +294,8 @@ cfg = {
     "Player": st.column_config.TextColumn(),
     "Team": st.column_config.TextColumn(),
     "Position": st.column_config.TextColumn(),
+    "Total Routes — A": st.column_config.NumberColumn("Total Routes — A", format="%d"),
+    "Total Routes — B": st.column_config.NumberColumn("Total Routes — B", format="%d"),
 }
 if is_pct:
     cfg[A_col] = st.column_config.NumberColumn(A_col, format="%.1f%%")
