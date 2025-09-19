@@ -1,4 +1,4 @@
-
+# /07_Raw_Data.py (updated)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -19,7 +19,7 @@ seasons   = sorted([int(x) for x in df["Season"].dropna().unique().tolist()])
 latest    = max(seasons) if seasons else None
 weeks_all = sorted([int(x) for x in df["Week"].dropna().unique().tolist()])
 teams_all = sorted(df["Team"].dropna().astype(str).unique().tolist())
-pos_opts  = ["WR","TE","RB","FB"]  # HB removed
+pos_opts  = ["WR","TE","RB","FB"]
 
 with st.sidebar:
     st.header("Filters")
@@ -29,7 +29,6 @@ with st.sidebar:
     pos_sel   = st.multiselect("Position", pos_opts, default=pos_opts)
     teams     = st.multiselect("Offense (Team)", teams_all, default=teams_all)
 
-    # defaults toggled OFF per request
     view = st.radio("View", ["Aggregated","Weekly rows"], horizontal=True, index=0)
     apply_week_min   = st.checkbox("Apply min per-week routes", value=False)
     min_week_routes  = st.number_input("Min routes per week", min_value=0, value=10, step=1)
@@ -46,7 +45,7 @@ if teams:            q &= df["Team"].astype(str).isin(teams)
 sub = df[q].copy()
 
 # Apply per-week min routes to the weekly slice we’ll reuse for recomputation
-sub_weekly = sub.copy()
+sub_weekly = add_weekly_rates(sub.copy())
 if apply_week_min and min_week_routes > 0 and "routes_week" in sub_weekly.columns:
     sub_weekly = sub_weekly[sub_weekly["routes_week"] >= int(min_week_routes)]
 
@@ -63,9 +62,14 @@ RATE_COLS = [
     "catchable_share","contested_share",
     # simple win rate
     "win_rate",
+    # NEW
+    "tprr","xTPRR",
 ]
-COUNT_COLS = ["routes_week","targets_week","receptions_week","receiving_yards_week"]
-BASE_COLS  = ["Season","Seas_Type","Week","Team","Player_Name","db_pos","receiver_tier","receiver_score"]
+COUNT_COLS = ["routes_week","targets_week","receptions_week","receiving_yards_week","xTargets_Week"]
+BASE_COLS  = ["Season","Seas_Type","Week","Team","Player_Name","db_pos",
+              # RR defaults:
+              "receiver_score_tier_per_route","receiver_score_per_route",
+              "receiver_tier","receiver_score"]
 
 # ---------- helpers ----------
 def percentize_inplace(frame: pd.DataFrame, cols: list[str]):
@@ -79,22 +83,21 @@ def recompute_weekly_team_shares(dfw: pd.DataFrame) -> pd.DataFrame:
         out["route_rate_team"] = out["routes_week"] / out["team_plays_with_route"].replace(0, np.nan)
     if {"targets_week","team_pass_attempts_week"}.issubset(out.columns):
         out["target_share_team"] = out["targets_week"] / out["team_pass_attempts_week"].replace(0, np.nan)
-    # NEW: 1st-read share uses (first + design) / (team_first + team_design)
     if {"first_read_targets_week","design_targets_week","team_first_read_attempts_week","team_design_read_attempts_week"}.issubset(out.columns):
         out["first_read_share_team"] = (out["first_read_targets_week"] + out["design_targets_week"]) / \
                                        (out["team_first_read_attempts_week"] + out["team_design_read_attempts_week"]).replace(0, np.nan)
-    # NEW: designed reads (per-route)
     if {"design_targets_week","routes_week"}.issubset(out.columns):
         out["designed_reads"] = out["design_targets_week"] / out["routes_week"].replace(0, np.nan)
     if {"route_wins_week","routes_week"}.issubset(out.columns):
         out["win_rate"] = out["route_wins_week"] / out["routes_week"].replace(0, np.nan)
-    # new weekly rates handled via add_weekly_rates, but keep here for safety
+    # Weekly TPRR / xTPRR
+    if {"targets_week","routes_week"}.issubset(out.columns):
+        out["tprr"] = out["targets_week"] / out["routes_week"].replace(0, np.nan)
+    if {"xTargets_Week","routes_week"}.issubset(out.columns):
+        out["xTPRR"] = out["xTargets_Week"] / out["routes_week"].replace(0, np.nan)
     return out
 
 def recompute_aggregated_team_shares_per_player(disp_agg: pd.DataFrame, weekly_source: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute Σ player numerators / Σ team denominators per player (collision-safe).
-    """
     if disp_agg.empty:
         return disp_agg
 
@@ -105,9 +108,10 @@ def recompute_aggregated_team_shares_per_player(disp_agg: pd.DataFrame, weekly_s
         .agg(
             routes_week_sum=("routes_week","sum"),
             targets_week_sum=("targets_week","sum"),
+            xTargets_Week_sum=("xTargets_Week","sum"),
+            route_wins_week_sum=("route_wins_week","sum"),
             first_read_targets_week_sum=("first_read_targets_week","sum"),
             design_targets_week_sum=("design_targets_week","sum"),
-            route_wins_week_sum=("route_wins_week","sum"),
         ).reset_index())
 
     # Σ team denominators by unique team-week per player (RENAMED)
@@ -130,53 +134,55 @@ def recompute_aggregated_team_shares_per_player(disp_agg: pd.DataFrame, weekly_s
 
     merged["route_rate_team"]       = merged.apply(lambda r: _sd(r["routes_week_sum"], r["team_plays_with_route_sum"]), axis=1)
     merged["target_share_team"]     = merged.apply(lambda r: _sd(r["targets_week_sum"], r["team_pass_attempts_week_sum"]), axis=1)
-    # NEW: first-read share team per spec
     merged["first_read_share_team"] = merged.apply(lambda r: _sd(
         r["first_read_targets_week_sum"] + r["design_targets_week_sum"],
         r["team_first_read_attempts_week_sum"] + r["team_design_read_attempts_week_sum"]
     ), axis=1)
-    # NEW: designed reads (per-route)
     merged["designed_reads"]        = merged.apply(lambda r: _sd(r["design_targets_week_sum"], r["routes_week_sum"]), axis=1)
     merged["win_rate"]              = merged.apply(lambda r: _sd(r["route_wins_week_sum"], r["routes_week_sum"]), axis=1)
+    # NEW: TPRR/xTPRR
+    merged["tprr"]                  = merged.apply(lambda r: _sd(r["targets_week_sum"], r["routes_week_sum"]), axis=1)
+    merged["xTPRR"]                 = merged.apply(lambda r: _sd(r["xTargets_Week_sum"], r["routes_week_sum"]), axis=1)
 
-    keep = list(disp_agg.columns) + ["route_rate_team","target_share_team","first_read_share_team","designed_reads","win_rate"]
+    keep = list(disp_agg.columns) + ["route_rate_team","target_share_team","first_read_share_team","designed_reads","win_rate","tprr","xTPRR"]
     return merged[keep]
 
 # ---------- build table ----------
 if view == "Weekly rows":
-    disp = add_weekly_rates(sub_weekly).copy()
+    disp = sub_weekly.copy()
     disp = recompute_weekly_team_shares(disp)   # exact match to Comparison logic
     disp = disp.loc[:, ~disp.columns.duplicated()]
+    # Use weekly RR columns for display
+    if "receiver_score_per_route" in disp.columns:
+        disp["Receiver_Score_RR_week"] = disp["receiver_score_per_route"]
+    if "receiver_score_tier_per_route" in disp.columns:
+        disp["Receiver_Tier_RR_week"] = disp["receiver_score_tier_per_route"]
     cols = [c for c in BASE_COLS + COUNT_COLS + RATE_COLS if c in disp.columns]
-
-    disp_out = disp.copy()
-    disp_out = disp_out.loc[:, ~disp_out.columns.duplicated()]
-    percentize_inplace(disp_out, [c for c in RATE_COLS if c in disp_out.columns])
-
 else:
-    # Aggregate first (tier-aware Σnum/Σden → RS), then recompute team shares per player from weekly rows
+    # Aggregate first (RR ΣxFP/Σroutes → RS), then recompute team shares per player from weekly rows
     disp = aggregate_and_rate(sub_weekly, apply_week_min=False, min_week_routes=0,
                               group_by_team=False, attach_primary_team=True)
     disp = disp.loc[:, ~disp.columns.duplicated()]
-
-    disp = recompute_aggregated_team_shares_per_player(disp, sub_weekly)
 
     if apply_season_min and "routes_week" in disp.columns and min_season_routes>0:
         disp = disp[disp["routes_week"] >= min_season_routes]
 
     cols = [c for c in BASE_COLS + COUNT_COLS + RATE_COLS if c in disp.columns]
 
-    disp_out = disp.copy()
-    disp_out = disp_out.loc[:, ~disp_out.columns.duplicated()]
-    percentize_inplace(disp_out, [c for c in RATE_COLS if c in disp_out.columns])
+disp_out = disp.copy()
+disp_out = disp_out.loc[:, ~disp_out.columns.duplicated()]
+percentize_inplace(disp_out, [c for c in RATE_COLS if c in disp_out.columns])
 
 # ---------- normalize headers ----------
 DISPLAY_MAP = {
     "Season":"Season", "Seas_Type":"Season Type", "Week":"Week", "Team":"Team",
     "Player_Name":"Player", "db_pos":"Position",
-    "receiver_tier":"Receiver Tier", "receiver_score":"Receiver Score",
+    # RR columns
+    "receiver_score_tier_per_route":"Receiver Tier / RR", "receiver_score_per_route":"Receiver Score / RR",
+    "receiver_tier":"Receiver Tier / RR", "receiver_score":"Receiver Score / RR",
     "routes_week":"Routes", "targets_week":"Targets",
     "receptions_week":"Receptions", "receiving_yards_week":"Receiving Yards",
+    "xTargets_Week":"xTargets",
     "route_rate_team":"Route Rate (team)", "target_share_team":"Aimed Target Share (team)",
     "first_read_share_team":"1st-Read Share (team)", "designed_reads":"Designed Reads",
     "man_win_rate":"Man Win Rate", "zone_win_rate":"Zone Win Rate", "slot_rate":"Slot Rate",
@@ -187,23 +193,27 @@ DISPLAY_MAP = {
     "condensed_route_rate":"Condensed Route Rate",
     "catchable_share":"Catchable Share", "contested_share":"Contested Share",
     "win_rate":"Win Rate",
+    "tprr":"TPRR", "xTPRR":"xTPRR",
 }
 cols = [c for c in cols if c in disp_out.columns]
 cols_disp = [DISPLAY_MAP.get(c, c) for c in cols]
 df_show = disp_out[cols].copy()
 df_show.columns = cols_disp
 
-# ---------- default sort by Receiver Score ----------
-if "Receiver Score" in df_show.columns:
-    df_show = df_show.sort_values("Receiver Score", ascending=False, kind="mergesort")
+# ---------- default sort by Receiver Score / RR ----------
+if "Receiver Score / RR" in df_show.columns:
+    df_show = df_show.sort_values("Receiver Score / RR", ascending=False, kind="mergesort")
 
 # ---------- formats ----------
 cfg = {
-    "Receiver Score": st.column_config.NumberColumn(format="%.0f"),
+    "Receiver Score / RR": st.column_config.NumberColumn(format="%.0f"),
     "Routes": st.column_config.NumberColumn(format="%d"),
     "Targets": st.column_config.NumberColumn(format="%d"),
     "Receptions": st.column_config.NumberColumn(format="%d"),
     "Receiving Yards": st.column_config.NumberColumn(format="%d"),
+    "xTargets": st.column_config.NumberColumn(format="%.1f"),
+    "TPRR": st.column_config.NumberColumn(format="%.1f%%"),
+    "xTPRR": st.column_config.NumberColumn(format="%.1f%%"),
 }
 percent_labels = [
     "Route Rate (team)","Aimed Target Share (team)","1st-Read Share (team)","Designed Reads",

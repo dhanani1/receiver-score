@@ -5,6 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 
 from utils import (
+    receiver_score_total_from_week_slice,
     load_weekly,
     add_weekly_rates,
     reasons_for_subset_vs_baseline,
@@ -75,16 +76,18 @@ tot_yards    = float(prof_agg.get("receiving_yards_week", pd.Series([0])).iloc[0
 
 # ---------- metric catalog ----------
 METRICS = [
-    ("Receiver Score","receiver_score"),
+    ("Receiver Score / RR","receiver_score_per_route"),
+    ("Receiver Score - Total","receiver_score_total"),
     ("Win Rate","win_rate"),
     ("Routes","routes_week"),
     ("Targets","targets_week"),
-    # team-denominator shares
+    ("xTargets","xTargets_Week"),
+    ("TPRR","tprr"),
+    ("xTPRR","xTPRR"),
     ("Route Rate (team)","route_rate_team"),
     ("Aimed Target Share (team)","target_share_team"),
     ("1st-Read Share (team)","first_read_share_team"),
     ("Designed Reads","designed_reads"),
-    # modeled situational rates
     ("Man Win Rate","man_win_rate"),
     ("Zone Win Rate","zone_win_rate"),
     ("Slot Rate","slot_rate"),
@@ -108,8 +111,19 @@ def is_pct_label(s: str) -> bool:
 # Aggregated value for the two metric tiles:
 def agg_metric_value(label: str) -> float:
     col = name2col[label]
-    if col == "receiver_score":
+    if label in ["Receiver Score / RR","Receiver Score - Total"]:
         return prof_rs
+    if label == "Receiver Score - Total":
+        return receiver_score_total_from_week_slice(cur)
+    if col in ["routes_week","targets_week","xTargets_Week"]:
+        if col == "routes_week":
+            return tot_routes
+        if col == "targets_week":
+            return tot_targets
+        return float(pd.to_numeric(cur.get("xTargets_Week",0), errors="coerce").sum())
+    # otherwise average weekly rates for the window
+    return pd.to_numeric(cur_rates.get(col, np.nan), errors="coerce").mean()
+    return prof_rs
     if col in ["routes_week","targets_week"]:
         return tot_routes if col == "routes_week" else tot_targets
     return pd.to_numeric(cur_rates.get(col, np.nan), errors="coerce").mean()
@@ -143,6 +157,10 @@ if len(hover) != len(cur_rates):
 # ---------- plotting ----------
 def plot_metric(label: str):
     col = name2col[label]
+    if col == "receiver_score_total":
+        col = "receiver_score"
+    if col == "receiver_score_total":
+        col = "receiver_score"  # use weekly precomputed total scores
     if col not in cur_rates.columns:
         st.info(f"{label} not available.")
         return
