@@ -1,5 +1,4 @@
-
-# /Users/Zain/fantasy_wwr/PROD/streamlit_app/utils.py
+# /utils.py (updated)
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
@@ -8,15 +7,27 @@ import pandas as pd
 
 # ---------- Paths ----------
 APP_DIR      = Path(__file__).resolve().parent
-PROJECT_ROOT = APP_DIR.parent.parent          # /Users/Zain/fantasy_wwr
+PROJECT_ROOT = APP_DIR.parent.parent          # /.../fantasy_wwr
 DATA_DIR     = PROJECT_ROOT / "data"
 WEEKLY_CSV   = DATA_DIR / "weekly.csv"
-TIERS_CSV    = DATA_DIR / "receiver_score_tiers_by_season_pos.csv"
+
+# New: per-route (RR) tiers by Season × pos_group
+RR_TIERS_CSV      = DATA_DIR / "receiver_score_tiers_by_season_pos_RR.csv"
+# New: weekly absolute-xFP tiers by Season × Week × pos_group
+WEEKLY_TIERS_CSV  = DATA_DIR / "receiver_score_tiers_by_season_pos_weekly.csv"
+
 
 # ---------- Loaders ----------
 def load_weekly() -> pd.DataFrame:
     """
     Hardened loader; normalizes common columns and dtypes.
+    Includes new weekly fields/grades:
+      - xTargets_Week (float)
+      - xFP_Rec_Week (float)
+      - xTPRR_Week   (float, expected targets per route for that week)
+      - xFP_Rec_Week_RR (float, xFP per route that week)
+      - receiver_score_per_route / receiver_score_tier_per_route (weekly RR-based)
+      - receiver_score / receiver_score_tier (weekly absolute-xFP based on weekly tiers)
     """
     if not WEEKLY_CSV.exists():
         raise FileNotFoundError(
@@ -55,27 +66,50 @@ def load_weekly() -> pd.DataFrame:
         "catchable_targets_week","contested_targets_week",
         # new weekly counters
         "horizontal_routes_week","plays_leq3_total_routes_week","plays_wr_routes_leq1_week",
+        # new weekly xFP/xTargets
+        "xTargets_Week","xFP_Rec_Week","xTPRR_Week","xFP_Rec_Week_RR",
+        # precomputed weekly grades
+        "receiver_score","receiver_score_per_route",
     ]
     for c in numeric_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
+    # Normalize tiers if present as strings
+    for c in ["receiver_score_tier","receiver_score_tier_per_route"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str)
+
     return df
 
-def load_tiers() -> Optional[pd.DataFrame]:
+
+def load_rr_tiers() -> Optional[pd.DataFrame]:
     """
-    Loads per-season, per-pos_group tier cutoffs (p30/p50/p70/p90) used to map
-    aggregated WWR to 0–100 Receiver Score.
+    Loads per-season, per-pos_group **per-route** tier cutoffs (p30/p50/p70/p90)
+    used to map aggregated xFP_per_route → 0–100 Receiver Score / RR.
     """
-    if not TIERS_CSV.exists():
+    if not RR_TIERS_CSV.exists():
         return None
-    t = pd.read_csv(TIERS_CSV)
-    # tolerate older column name
-    if "tier_p30" not in t.columns and "tier_p25" in t.columns:
-        t["tier_p30"] = t["tier_p25"]
+    t = pd.read_csv(RR_TIERS_CSV)
     if "Season" in t.columns:
         t["Season"] = pd.to_numeric(t["Season"], errors="coerce").astype("Int64")
     return t
+
+
+def load_weekly_tiers() -> Optional[pd.DataFrame]:
+    """
+    Loads per-week absolute-xFP tier cutoffs (p30/p50/p70/p90) by Season × Week × pos_group.
+    Used to compute aggregated 'Receiver Score Total' for arbitrary week selections
+    by summing weekly thresholds.
+    """
+    if not WEEKLY_TIERS_CSV.exists():
+        return None
+    t = pd.read_csv(WEEKLY_TIERS_CSV)
+    for c in ("Season","Week"):
+        if c in t.columns:
+            t[c] = pd.to_numeric(t[c], errors="coerce").astype("Int64")
+    return t
+
 
 # ---------- Helpers ----------
 def map_pos_group(db_pos: str | float | None) -> Optional[str]:
@@ -87,6 +121,7 @@ def map_pos_group(db_pos: str | float | None) -> Optional[str]:
     if p in ("RB","HB","FB"): return "Backfield"
     return None
 
+
 def safe_rate(n, d) -> float:
     try:
         n = float(n or 0); d = float(d or 0)
@@ -94,9 +129,11 @@ def safe_rate(n, d) -> float:
     except Exception:
         return np.nan
 
+
 def piecewise_score(v: float, t30: float, t50: float, t70: float, t90: float) -> float:
     """
-    Map WWR (0..1) to 0..100 using piecewise bands with 30/50/70/90 cutpoints.
+    Map a value to 0..100 using piecewise bands with 30/50/70/90 cutpoints.
+    Ensures monotone thresholds.
     """
     arr = [v, t30, t50, t70, t90]
     if any(pd.isna(a) for a in arr):
@@ -117,6 +154,7 @@ def piecewise_score(v: float, t30: float, t50: float, t70: float, t90: float) ->
     # ≥ p90 → 90..100 (stretch last band)
     band = max(t90 - t70, eps)
     return min(100.0, 90.0 + 10.0 * (v - t90) / band)
+
 
 # ---------- Weekly derived rates for table/plots ----------
 RATE_DEFS: List[Tuple[str,str,str]] = [
@@ -150,9 +188,8 @@ def add_weekly_rates(df: pd.DataFrame) -> pd.DataFrame:
     if {"routes_week","team_plays_with_route"}.issubset(f.columns):
         f["route_rate_team"] = f.apply(lambda r: safe_rate(r["routes_week"], r["team_plays_with_route"]), axis=1)
     if {"targets_week","team_pass_attempts_week"}.issubset(f.columns):
-        # Rename in UI only; column id stays target_share_team
         f["target_share_team"] = f.apply(lambda r: safe_rate(r["targets_week"], r["team_pass_attempts_week"]), axis=1)
-    # NEW: First Read (team) = (first + design) / (team_first + team_design)
+    # 1st Read (team) = (first + design) / (team_first + team_design)
     if {"first_read_targets_week","design_targets_week","team_first_read_attempts_week","team_design_read_attempts_week"}.issubset(f.columns):
         f["first_read_share_team"] = f.apply(
             lambda r: safe_rate(
@@ -160,24 +197,35 @@ def add_weekly_rates(df: pd.DataFrame) -> pd.DataFrame:
                 float(r.get("team_first_read_attempts_week",0)) + float(r.get("team_design_read_attempts_week",0))
             ), axis=1
         )
-    # Designed Reads already computed via RATE_DEFS as 'designed_reads'
+    # NEW: weekly TPRR and xTPRR (use the canonical column names expected by UI)
+    if {"targets_week","routes_week"}.issubset(f.columns):
+        f["tprr"] = f.apply(lambda r: safe_rate(r.get("targets_week",0), r.get("routes_week",0)), axis=1)
+    if {"xTargets_Week","routes_week"}.issubset(f.columns):
+        f["xTPRR"] = f.apply(lambda r: safe_rate(r.get("xTargets_Week",0.0), r.get("routes_week",0.0)), axis=1)
+
     return f
 
-# ---------- Aggregation to PLAYER (Σnums / Σdens) + tier-indexed Receiver Score ----------
+
+# ---------- Aggregation to PLAYER (Σ) + RR-indexed Receiver Score ----------
 def aggregate_and_rate(
     frame: pd.DataFrame,
     apply_week_min: bool = False,
     min_week_routes: int = 0,
     group_by_team: bool = False,
     attach_primary_team: bool = True,
-    recompute_receiver_score_from_WWR: bool = True,
 ) -> pd.DataFrame:
     """
     Aggregates the provided slice to PLAYER (or PLAYER+TEAM) and computes:
-      • season_wwr = Σ WWR_ML_numerator / Σ WWR_ML_denominator
-      • receiver_score = piecewise(season_wwr; season+pos_group tiers)
+      • routes_sum / targets_sum / xTargets_sum / xFP_sum
+      • xfp_per_route = Σ xFP_Rec_Week / Σ routes
+      • receiver_score (0–100) = piecewise(xfp_per_route; **RR tiers** Season×pos_group)
+      • receiver_tier (label) for the RR score
       • team shares: route_rate_team / target_share_team / first_read_share_team
-      • derived rates: man/zone/slot/motion/..., horizontal_route_rate, condensed_route_rate, designed_reads
+      • derived rates: man/zone/slot/motion/.../horizontal/condensed/designed_reads
+      • tprr and xTPRR
+    Notes:
+      - We purposefully use the Season×pos_group **RR** tiers file:
+        receiver_score_tiers_by_season_pos_RR.csv
     """
     if frame is None or frame.empty:
         return frame.copy()
@@ -192,8 +240,8 @@ def aggregate_and_rate(
 
     # collect columns to sum
     sum_cols = set([
-        "WWR_ML_numerator","WWR_ML_denominator",
         "routes_week","targets_week",
+        "xTargets_Week","xFP_Rec_Week",
         "receptions_week","receiving_yards_week",
         # team denominators for shares
         "team_plays_with_route","team_pass_attempts_week",
@@ -202,11 +250,13 @@ def aggregate_and_rate(
         "horizontal_routes_week","plays_leq3_total_routes_week",
     ])
     # add standard rate parts
-    for out, num, den in RATE_DEFS:
+    for _, num, den in RATE_DEFS:
         sum_cols.add(num); sum_cols.add(den)
-    sum_cols = [c for c in sum_cols if c in f.columns]
+    # add WWR pieces so legacy cards can still compute if needed
+    sum_cols.add("WWR_ML_numerator"); sum_cols.add("WWR_ML_denominator")
 
-    g = f.groupby(keys, dropna=False)[sum_cols].sum(numeric_only=True).reset_index()
+    present = [c for c in sum_cols if c in f.columns]
+    g = f.groupby(keys, dropna=False)[present].sum(numeric_only=True).reset_index()
 
     # recompute standard/added rates
     for out, num, den in RATE_DEFS:
@@ -216,7 +266,6 @@ def aggregate_and_rate(
     # team-denominator shares
     g["route_rate_team"]       = g.apply(lambda r: safe_rate(r.get("routes_week",0), r.get("team_plays_with_route",0)), axis=1)
     g["target_share_team"]     = g.apply(lambda r: safe_rate(r.get("targets_week",0), r.get("team_pass_attempts_week",0)), axis=1)
-    # NEW: First Read (team) = (first + design) / (team_first + team_design)
     if {"first_read_targets_week","design_targets_week","team_first_read_attempts_week","team_design_read_attempts_week"}.issubset(g.columns):
         g["first_read_share_team"] = g.apply(
             lambda r: safe_rate(
@@ -224,21 +273,21 @@ def aggregate_and_rate(
                 float(r.get("team_first_read_attempts_week",0)) + float(r.get("team_design_read_attempts_week",0))
             ), axis=1
         )
-    # designed_reads already computed as design_targets_week / routes_week
 
-    # ΣWWR and tier-indexed Receiver Score
-    den = pd.to_numeric(g.get("WWR_ML_denominator",0), errors="coerce")
-    num = pd.to_numeric(g.get("WWR_ML_numerator",0), errors="coerce")
-    g["season_wwr"] = np.where(den > 0, num/den, np.nan)
+    # Aggregated TPRR and xTPRR
+    g["tprr"]  = g.apply(lambda r: safe_rate(r.get("targets_week",0),  r.get("routes_week",0)), axis=1)
+    g["xTPRR"] = g.apply(lambda r: safe_rate(r.get("xTargets_Week",0), r.get("routes_week",0)), axis=1)
 
-    tiers = load_tiers()
+    # RR-based Receiver Score (Σ xFP / Σ routes vs Season×pos_group RR tiers)
+    g["xfp_per_route"] = g.apply(lambda r: safe_rate(r.get("xFP_Rec_Week",0.0), r.get("routes_week",0.0)), axis=1)
+    tiers = load_rr_tiers()
+    g["pos_group"] = g["db_pos"].apply(map_pos_group)
     if tiers is not None:
-        g["pos_group"] = g["db_pos"].apply(map_pos_group)
-        g = g.merge(tiers, on=["Season","pos_group"], how="left")
+        g = g.merge(tiers, on=["Season","pos_group"], how="left", suffixes=("","_rr"))
         g["receiver_score"] = [
             piecewise_score(v, t30, t50, t70, t90)
             for v, t30, t50, t70, t90 in zip(
-                g["season_wwr"],
+                g["xfp_per_route"],
                 g.get("tier_p30"), g.get("tier_p50"), g.get("tier_p70"), g.get("tier_p90")
             )
         ]
@@ -252,12 +301,12 @@ def aggregate_and_rate(
         g["receiver_tier"] = [
             _tier(v,t30,t50,t70,t90)
             for v,t30,t50,t70,t90 in zip(
-                g["season_wwr"], g.get("tier_p30"), g.get("tier_p50"), g.get("tier_p70"), g.get("tier_p90")
+                g["xfp_per_route"], g.get("tier_p30"), g.get("tier_p50"), g.get("tier_p70"), g.get("tier_p90")
             )
         ]
     else:
-        # fallback: still return something sensible
-        g["receiver_score"] = g["season_wwr"] * 100.0
+        # fallback: scale xfp_per_route to 0..100 by percentile-free heuristic
+        g["receiver_score"] = g["xfp_per_route"] * 100.0
         g["receiver_tier"] = g["receiver_score"].apply(
             lambda s: "Elite" if s>=90 else "Good" if s>=70 else "Average" if s>=50 else "Below Average" if s>=30 else "Weak"
         )
@@ -272,12 +321,54 @@ def aggregate_and_rate(
 
     return g.loc[:, ~g.columns.duplicated()]
 
+
+# ---------- Utility: Aggregate "Receiver Score Total" for arbitrary week selections ----------
+def receiver_score_total_from_week_slice(week_slice: pd.DataFrame) -> float:
+    """
+    Given a weekly slice for a *single* Season×pos_group (and typically single player),
+    compute an aggregated "Receiver Score Total" by:
+      • V = Σ xFP_Rec_Week across selected weeks
+      • For the same Season×pos_group, sum weekly cutpoints across the selected weeks:
+          T30 = Σ tier_p30 (per week), T50 = Σ tier_p50, T70 = Σ tier_p70, T90 = Σ tier_p90
+      • Score = piecewise(V; T30,T50,T70,T90)
+    Returns np.nan if Season or pos_group are ambiguous or if weekly tiers file is missing.
+    """
+    if week_slice is None or week_slice.empty:
+        return np.nan
+
+    w = week_slice.copy()
+    seasons = [s for s in pd.unique(w["Season"]) if pd.notna(s)]
+    posg    = [map_pos_group(x) for x in pd.unique(w["db_pos"]) if pd.notna(x)]
+    if len(seasons) != 1 or len(set(posg)) != 1:
+        return np.nan
+    season = int(seasons[0]); pos_group = list(set(posg))[0]
+
+    wt = load_weekly_tiers()
+    if wt is None:
+        return np.nan
+
+    weeks = sorted([int(x) for x in pd.to_numeric(w["Week"], errors="coerce").dropna().unique().tolist()])
+    if not weeks:
+        return np.nan
+
+    sub = wt[(wt["Season"].eq(season)) & (wt["pos_group"].astype(str).eq(pos_group)) & (wt["Week"].isin(weeks))]
+    if sub.empty:
+        return np.nan
+
+    t30 = float(pd.to_numeric(sub["tier_p30"], errors="coerce").sum())
+    t50 = float(pd.to_numeric(sub["tier_p50"], errors="coerce").sum())
+    t70 = float(pd.to_numeric(sub["tier_p70"], errors="coerce").sum())
+    t90 = float(pd.to_numeric(sub["tier_p90"], errors="coerce").sum())
+
+    v = float(pd.to_numeric(w.get("xFP_Rec_Week", 0.0), errors="coerce").sum())
+    return piecewise_score(v, t30, t50, t70, t90)
+
+
 # ---------- Comparison explainer (drivers; TEAM denominators where applicable) ----------
-# We keep a label-oriented list and handle special formulas inside the builder.
 DRIVERS: List[Tuple[str,str,str]] = [
     ("Route rate (team)",            "routes_week",              "team_plays_with_route"),
     ("Aimed target share (team)",    "targets_week",             "team_pass_attempts_week"),
-    ("1st-read share (team)",        "first_read_targets_week",  "team_first_read_attempts_week"),  # will combine with design in _driver_table
+    ("1st-read share (team)",        "first_read_targets_week",  "team_first_read_attempts_week"),  # combine with design in _driver_table
     ("Designed reads",               "design_targets_week",      "routes_week"),
     ("Behind LOS rate",              "behind_los_routes_week",   "routes_week"),
     ("Short rate",                   "short_routes_week",        "routes_week"),
@@ -347,9 +438,11 @@ def reasons_for_subset_vs_baseline(
             .reset_index(drop=True)
     return text, out
 
-# ---------- Simple cohort aggregator for top cards (optional) ----------
+
+# ---------- Simple cohort aggregator for top cards ----------
 AGG_SUMS = [
     "WWR_ML_numerator","WWR_ML_denominator","routes_week","targets_week",
+    "xTargets_Week","xFP_Rec_Week",
     "receptions_week","receiving_yards_week",
     "team_plays_with_route","team_pass_attempts_week",
     "team_first_read_attempts_week","team_design_read_attempts_week",
@@ -357,18 +450,21 @@ AGG_SUMS = [
 
 def _aggregate_cohort(df: pd.DataFrame) -> Dict[str, float]:
     """
-    For quick top cards: returns Σ totals and a Receiver Score aggregate mapped to tiers
-    when Season and pos_group are unambiguous; else falls back to WWR×100.
+    For quick top cards: returns Σ totals and an RR-based Receiver Score aggregate mapped to RR tiers
+    when Season and pos_group are unambiguous; else falls back to xfp_per_route × 100.
     """
     if df is None or df.empty:
-        return {k: np.nan for k in AGG_SUMS + ["WWR_ML_value","receiver_score_agg"]}
+        return {k: np.nan for k in AGG_SUMS + ["xfp_per_route","receiver_score_agg","receiver_score_total_agg"]}
     sums = df[AGG_SUMS].sum(numeric_only=True)
-    num = float(sums.get("WWR_ML_numerator",0)); den = float(sums.get("WWR_ML_denominator",0))
-    wwr = (num/den) if den>0 else np.nan
-    out = sums.to_dict(); out["WWR_ML_value"] = wwr
+    out = sums.to_dict()
 
-    tiers = load_tiers()
-    if pd.notna(wwr) and tiers is not None:
+    # RR score
+    routes = float(sums.get("routes_week",0)); xfp = float(sums.get("xFP_Rec_Week",0.0))
+    xpr = (xfp / routes) if routes>0 else np.nan
+    out["xfp_per_route"] = xpr
+
+    tiers = load_rr_tiers()
+    if pd.notna(xpr) and tiers is not None:
         seasons = [s for s in pd.unique(df["Season"]) if pd.notna(s)]
         posg    = [map_pos_group(x) for x in pd.unique(df["db_pos"]) if pd.notna(x)]
         if len(seasons) == 1 and len(set(posg)) == 1:
@@ -376,8 +472,15 @@ def _aggregate_cohort(df: pd.DataFrame) -> Dict[str, float]:
             row = tiers[(tiers["Season"].eq(s)) & (tiers["pos_group"].astype(str).eq(pg))]
             if not row.empty:
                 t30, t50, t70, t90 = [float(row.iloc[0][c]) for c in ("tier_p30","tier_p50","tier_p70","tier_p90")]
-                out["receiver_score_agg"] = piecewise_score(wwr, t30, t50, t70, t90)
-                return out
-    # fallback
-    out["receiver_score_agg"] = wwr*100.0 if pd.notna(wwr) else np.nan
+                out["receiver_score_agg"] = piecewise_score(xpr, t30, t50, t70, t90)
+            else:
+                out["receiver_score_agg"] = xpr * 100.0 if pd.notna(xpr) else np.nan
+        else:
+            out["receiver_score_agg"] = xpr * 100.0 if pd.notna(xpr) else np.nan
+    else:
+        out["receiver_score_agg"] = xpr * 100.0 if pd.notna(xpr) else np.nan
+
+    # Total score using weekly tiers across selected weeks
+    out["receiver_score_total_agg"] = receiver_score_total_from_week_slice(df)
+
     return out
